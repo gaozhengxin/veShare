@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.11;
+pragma solidity ^0.8.2;
 
 import "github.com/OpenZeppelin/openzeppelin-contracts/contracts/token/ERC721/ERC721.sol";
 
@@ -136,8 +136,6 @@ contract RewardShare is ERC721, Administrable {
       uint256 userLockStart;
       uint256 userLockEnd;
       uint256 collectedTime;
-      uint256 epochStart;
-      uint256 epochEnd;
       for (uint i = startEpochId; i <= endEpochId; i++) {
         uint256 reward_i = globalReward[i];
         (uint epochStartTime, uint epochEndTime, ) = IReward(vereward).getEpochInfo(i);
@@ -171,7 +169,7 @@ contract RewardShare is ERC721, Administrable {
                 return (false, 0);
             }
         }
-        uint tokenId = nextTokenId;
+        tokenId = nextTokenId;
         nextTokenId += 1;
         _mint(to, tokenId);
         tokenInfo[tokenId] = TokenInfo(share, startDay * day, endDay * day);
