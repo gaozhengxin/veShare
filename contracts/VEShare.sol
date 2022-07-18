@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 interface IERC20 {
     function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
     function balanceOf(address owner) external view returns (uint balance);
+    function approve(address to, uint tokenId) external;
 }
 
 interface IVE {
@@ -72,6 +73,7 @@ contract RewardShare is ERC721, Administrable {
 
     function createVe(uint256 amount, uint256 duration) onlyAdmin external returns (uint) {
         require(ve_tokenId == 0);
+        IERC20(multi).approve(ve, amount);
         ve_tokenId = IVE(ve).create_lock(amount, duration);
         return ve_tokenId;
     }
