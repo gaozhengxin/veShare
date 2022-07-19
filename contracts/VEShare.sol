@@ -24,6 +24,7 @@ interface IReward {
   function claimReward(uint tokenId, uint startEpoch, uint endEpoch) external returns (uint reward);
   function getEpochIdByTime(uint _time) view external returns (uint);
   function getEpochInfo(uint epochId) view external returns (uint, uint, uint);
+  function getPendingRewardSingle(uint tokenId, uint epochId) view external returns (uint reward, bool finished);
 }
 
 contract Administrable {
@@ -63,6 +64,10 @@ contract RewardShare is ERC721, Administrable {
     uint256 public ve_tokenId;
     address public vereward;
     address public multi;
+    uint256 public totalLocked;
+    uint256 constant totalShare = 10000;
+    mapping (uint256 => uint256) public totalAmount; // day => total multi amount
+    mapping (uint256 => uint256) public globalReward; // epochId => reward
 
     constructor (address multi_, address ve_, address vereward_, string memory name_, string memory symbol_) ERC721(name_, symbol_) {
         ve = ve_;
@@ -75,6 +80,7 @@ contract RewardShare is ERC721, Administrable {
         require(ve_tokenId == 0);
         IERC20(multi).approve(ve, amount);
         ve_tokenId = IVE(ve).create_lock(amount, duration);
+        totalLocked = amount;
         return ve_tokenId;
     }
 
@@ -95,8 +101,6 @@ contract RewardShare is ERC721, Administrable {
         ve_tokenId = 0;
     }
 
-    mapping (uint256 => uint256) public globalReward; // epochId => reward
-
     function collectGlobalReward(uint256 startEpochId, uint256 endEpochId) internal {
       for (uint i = startEpochId; i <= endEpochId; i++) {
         globalReward[i] += IReward(vereward).claimReward(ve_tokenId, i, i);
@@ -106,14 +110,56 @@ contract RewardShare is ERC721, Administrable {
     mapping (uint256 => uint256) public lastHarvestUntil; // tokenId => time
 
     mapping (uint256 => TokenInfo) public tokenInfo;
-    mapping (uint256 => uint256) public totalShare; // day => total share
 
     uint256 public day = 1 days;
 
     struct TokenInfo {
-        uint8 share;
+        uint256 share;
         uint256 startTime;
         uint256 endTime;
+    }
+
+    function claimableAll(uint256 tokenId) external view returns(uint256) {
+      uint256 startTime = lastHarvestUntil[tokenId] > tokenInfo[tokenId].startTime ? lastHarvestUntil[tokenId] : tokenInfo[tokenId].startTime;
+      uint256 endTime = block.timestamp < tokenInfo[tokenId].endTime ? block.timestamp : tokenInfo[tokenId].endTime;
+      return _claimable(tokenId, startTime, endTime);
+    }
+
+    function claimable(uint256 tokenId, uint256 endTime) external view returns(uint256) {
+      uint256 startTime = lastHarvestUntil[tokenId] > tokenInfo[tokenId].startTime ? lastHarvestUntil[tokenId] : tokenInfo[tokenId].startTime;
+      require(endTime <= block.timestamp && endTime <= tokenInfo[tokenId].endTime);
+      return _claimable(tokenId, startTime, endTime);
+    }
+  
+    function _claimable(uint256 tokenId, uint256 startTime, uint256 endTime) internal view returns(uint256) {
+      uint256 startEpochId = IReward(vereward).getEpochIdByTime(startTime);
+      uint256 endEpochId = IReward(vereward).getEpochIdByTime(endTime);
+
+      (uint256 uncollected,) = IReward(vereward).getPendingRewardSingle(ve_tokenId, endEpochId);
+
+      uint256 reward = 0;
+      uint256 userLockStart;
+      uint256 userLockEnd;
+      uint256 collectedTime;
+      for (uint i = startEpochId; i <= endEpochId; i++) {
+        uint256 reward_i = globalReward[i] + uncollected;
+        (uint epochStartTime, uint epochEndTime, ) = IReward(vereward).getEpochInfo(i);
+        // user's unclaimed time span in an epoch
+        userLockStart = epochStartTime;
+        userLockEnd = epochEndTime;
+        collectedTime = epochEndTime - epochStartTime;
+        if (i == startEpochId) {
+          userLockStart = startTime;
+        }
+        if (i == endEpochId) {
+          userLockEnd = endTime; // assuming endTime <= block.timestamp
+          collectedTime = block.timestamp - epochStartTime;
+        }
+        reward_i = reward_i * (userLockEnd - userLockStart) / collectedTime;
+        reward += reward_i;
+      }
+      uint256 userReward = reward * tokenInfo[tokenId].share / totalLocked;
+      return userReward;
     }
 
     function harvestAll(uint256 tokenId) external {
@@ -157,24 +203,67 @@ contract RewardShare is ERC721, Administrable {
       }
       // update last harvest time
       lastHarvestUntil[tokenId] = endTime;
-      uint256 userReward = reward * tokenInfo[tokenId].share / 100;
+      uint256 userReward = reward * tokenInfo[tokenId].share / totalLocked;
       IERC20(IReward(vereward).rewardToken()).transferFrom(address(this), msg.sender, userReward);
     }
 
-    function mint(address to, uint8 share, uint256 start, uint256 end) external onlyAdmin returns (bool success, uint256 tokenId) {
-        uint startDay = start / day;
-        uint endDay = end / day + 1;
-        require(endDay - startDay <= 360, "duration is too long");
-        for (uint i = start; i < end; i++) {
-            totalShare[i] = totalShare[i] + share;
-            if (totalShare[i] > 100) {
-                return (false, 0);
-            }
+    function _createLock(address to, uint256 amount, uint256 startDay, uint256 endDay) internal onlyAdmin returns (bool success, uint256 tokenId) {
+      for (uint i = startDay; i < endDay; i++) {
+        totalAmount[i] = totalAmount[i] + amount;
+        if (totalAmount[i] > totalLocked) {
+          return (false, 0);
         }
-        tokenId = nextTokenId;
-        nextTokenId += 1;
-        _mint(to, tokenId);
-        tokenInfo[tokenId] = TokenInfo(share, startDay * day, endDay * day);
-        return (true, tokenId);
+      }
+      tokenId = nextTokenId;
+      nextTokenId += 1;
+      _mint(to, tokenId);
+      tokenInfo[tokenId] = TokenInfo(amount, startDay * day, endDay * day);
+      return (true, tokenId);
+    }
+
+    function mint(address to, uint256 amount, uint256 startTime, uint256 endTime) external onlyAdmin returns (bool success, uint256 tokenId) {
+      uint startDay = startTime / day;
+      uint endDay = endTime / day + 1;
+      require(endDay - startDay <= 360, "duration is too long");
+      return _createLock(to, amount, startDay, endDay);
+    }
+
+    function mintBatch(address[] calldata to, uint256 amount, uint256 startTime, uint256 endTime) external onlyAdmin returns (bool[] memory success, uint256[] memory tokenId) {
+      uint len = to.length;
+      success = new bool[](len);
+      tokenId = new uint256[](len);
+      uint startDay = startTime / day;
+      uint endDay = endTime / day + 1;
+      require(endDay - startDay <= 360, "duration is too long");
+      for (uint i = 0; i < len; i++) {
+        (bool succ, uint256 tid) = _createLock(to[i], amount, startDay, endDay);
+        success[i] = succ;
+        tokenId[i] = tid;
+      }
+      return (success, tokenId);
+    }
+
+    function mintByShare(address to, uint256 share, uint256 startTime, uint256 endTime) public onlyAdmin returns (bool success, uint256 tokenId) {
+      uint startDay = startTime / day;
+      uint endDay = endTime / day + 1;
+      uint256 amount = share * totalLocked / totalShare;
+      require(endDay - startDay <= 360, "duration is too long");
+      return _createLock(to, amount, startDay, endDay);
+    }
+
+    function mintBatchByShare(address[] calldata to, uint256 share, uint256 startTime, uint256 endTime) external onlyAdmin returns (bool[] memory success, uint256[] memory tokenId) {
+      uint len = to.length;
+      success = new bool[](len);
+      tokenId = new uint256[](len);
+      uint startDay = startTime / day;
+      uint endDay = endTime / day + 1;
+      uint256 amount = share * totalLocked / totalShare;
+      require(endDay - startDay <= 360, "duration is too long");
+      for (uint i = 0; i < len; i++) {
+        (bool succ, uint256 tid) = _createLock(to[i], amount, startDay, endDay);
+        success[i] = succ;
+        tokenId[i] = tid;
+      }
+      return (success, tokenId);
     }
 }
