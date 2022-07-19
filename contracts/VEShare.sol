@@ -69,6 +69,14 @@ contract RewardShare is ERC721, Administrable {
     mapping (uint256 => uint256) public totalAmount; // day => total multi amount
     mapping (uint256 => uint256) public globalReward; // epochId => reward
 
+    event LogCreateSharedVE(uint256 tokenId, uint256 amount, uint256 duration);
+    event LogWithdrawVE(uint256 tokenId);
+    event LogWithdrawMulti(uint256 amount);
+    event LogWithdrawReward(uint256 amount);
+    event LogHarvest(uint256 tokenId, uint256 endTime, uint256 amount);
+    event LogMint(uint256 tokenId, address to, uint256 amount, uint256 startTime, uint256 endTime);
+    event LogMintBatch(uint256[] tokenId, address[] to, uint256 amount, uint256 startTime, uint256 endTime);
+
     constructor (address multi_, address ve_, address vereward_, string memory name_, string memory symbol_) ERC721(name_, symbol_) {
         ve = ve_;
         vereward = vereward_;
@@ -81,6 +89,7 @@ contract RewardShare is ERC721, Administrable {
         IERC20(multi).approve(ve, amount);
         ve_tokenId = IVE(ve).create_lock(amount, duration);
         totalLocked = amount;
+        emit LogCreateSharedVE(ve_tokenId, amount, duration);
         return ve_tokenId;
     }
 
@@ -88,16 +97,20 @@ contract RewardShare is ERC721, Administrable {
     function withdrawMulti(address to) onlyAdmin external {
         IVE(ve).withdraw(ve_tokenId);
         IVE(ve).withdraw(ve_tokenId);
-        IERC20(multi).transferFrom(address(this), to, IERC20(multi).balanceOf(address(this)));
+        uint256 amount = IERC20(multi).balanceOf(address(this));
+        IERC20(multi).transferFrom(address(this), to, amount);
         ve_tokenId = 0;
+        emit LogWithdrawMulti(amount);
     }
 
     function withdrawReward(address to, uint256 amount) onlyAdmin external {
         IERC20(IReward(vereward).rewardToken()).transferFrom(address(this), to, amount);
+        emit LogWithdrawReward(amount);
     }
 
     function withdrawVe(address to) onlyAdmin external {
         IVE(ve).safeTransferFrom(address(this), to, ve_tokenId);
+        emit LogWithdrawVE(ve_tokenId);
         ve_tokenId = 0;
     }
 
@@ -166,17 +179,19 @@ contract RewardShare is ERC721, Administrable {
       // user's unclaimed timespan
       uint256 startTime = lastHarvestUntil[tokenId] > tokenInfo[tokenId].startTime ? lastHarvestUntil[tokenId] : tokenInfo[tokenId].startTime;
       uint256 endTime = block.timestamp < tokenInfo[tokenId].endTime ? block.timestamp : tokenInfo[tokenId].endTime;
-      _harvest(tokenId, startTime, endTime);
+      uint256 amount = _harvest(tokenId, startTime, endTime);
+      emit LogHarvest(tokenId, endTime, amount);
     }
 
     function harvest(uint256 tokenId, uint256 endTime) external {
       // user's unclaimed timespan
       uint256 startTime = lastHarvestUntil[tokenId] > tokenInfo[tokenId].startTime ? lastHarvestUntil[tokenId] : tokenInfo[tokenId].startTime;
       require(endTime <= block.timestamp && endTime <= tokenInfo[tokenId].endTime);
-      _harvest(tokenId, startTime, endTime);
+      uint256 amount = _harvest(tokenId, startTime, endTime);
+      emit LogHarvest(tokenId, endTime, amount);
     }
 
-    function _harvest(uint256 tokenId, uint256 startTime, uint256 endTime) internal {
+    function _harvest(uint256 tokenId, uint256 startTime, uint256 endTime) internal returns (uint256) {
       uint256 startEpochId = IReward(vereward).getEpochIdByTime(startTime);
       uint256 endEpochId = IReward(vereward).getEpochIdByTime(endTime);
       collectGlobalReward(startEpochId, endEpochId);
@@ -205,6 +220,7 @@ contract RewardShare is ERC721, Administrable {
       lastHarvestUntil[tokenId] = endTime;
       uint256 userReward = reward * tokenInfo[tokenId].share / totalLocked;
       IERC20(IReward(vereward).rewardToken()).transferFrom(address(this), msg.sender, userReward);
+      return userReward;
     }
 
     function _createLock(address to, uint256 amount, uint256 startDay, uint256 endDay) internal onlyAdmin returns (bool success, uint256 tokenId) {
@@ -225,7 +241,9 @@ contract RewardShare is ERC721, Administrable {
       uint startDay = startTime / day;
       uint endDay = endTime / day + 1;
       require(endDay - startDay <= 360, "duration is too long");
-      return _createLock(to, amount, startDay, endDay);
+      (success, tokenId) = _createLock(to, amount, startDay, endDay);
+      emit LogMint(tokenId, to, amount, startTime, endTime);
+      return (success, tokenId);
     }
 
     function mintBatch(address[] calldata to, uint256 amount, uint256 startTime, uint256 endTime) external onlyAdmin returns (bool[] memory success, uint256[] memory tokenId) {
@@ -240,6 +258,7 @@ contract RewardShare is ERC721, Administrable {
         success[i] = succ;
         tokenId[i] = tid;
       }
+      emit LogMintBatch(tokenId, to, amount, startTime, endTime);
       return (success, tokenId);
     }
 
@@ -248,7 +267,9 @@ contract RewardShare is ERC721, Administrable {
       uint endDay = endTime / day + 1;
       uint256 amount = share * totalLocked / totalShare;
       require(endDay - startDay <= 360, "duration is too long");
-      return _createLock(to, amount, startDay, endDay);
+      (success, tokenId) = _createLock(to, amount, startDay, endDay);
+      emit LogMint(tokenId, to, amount, startTime, endTime);
+      return (success, tokenId);
     }
 
     function mintBatchByShare(address[] calldata to, uint256 share, uint256 startTime, uint256 endTime) external onlyAdmin returns (bool[] memory success, uint256[] memory tokenId) {
@@ -264,6 +285,7 @@ contract RewardShare is ERC721, Administrable {
         success[i] = succ;
         tokenId[i] = tid;
       }
+      emit LogMintBatch(tokenId, to, amount, startTime, endTime);
       return (success, tokenId);
     }
 }
