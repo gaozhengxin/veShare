@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.2;
 
-import "./lib/ERC721.sol";
+import "./lib/ERC721Enumerable.sol";
 
 interface IERC20 {
-    function transferFrom(address sender, address recipient, uint256 amount) external returns (bool);
+    function transfer(address recipient, uint256 amount) external returns (bool);
     function balanceOf(address owner) external view returns (uint balance);
     function approve(address to, uint tokenId) external;
 }
@@ -59,7 +59,7 @@ contract Administrable {
     }
 }
 
-contract RewardShare is ERC721, Administrable {
+contract RewardShare is ERC721Enumerable, Administrable {
     address public ve;
     uint256 public ve_tokenId;
     address public vereward;
@@ -67,7 +67,7 @@ contract RewardShare is ERC721, Administrable {
     uint256 public totalLocked;
     uint256 constant totalShare = 10000;
     mapping (uint256 => uint256) public totalAmount; // day => total multi amount
-    mapping (uint256 => uint256) public globalReward; // epochId => reward
+    mapping (uint256 => uint256) public rewardCollected; // epochId => reward
 
     event LogCreateSharedVE(uint256 tokenId, uint256 amount, uint256 duration);
     event LogWithdrawVE(uint256 tokenId);
@@ -98,13 +98,13 @@ contract RewardShare is ERC721, Administrable {
         IVE(ve).withdraw(ve_tokenId);
         IVE(ve).withdraw(ve_tokenId);
         uint256 amount = IERC20(multi).balanceOf(address(this));
-        IERC20(multi).transferFrom(address(this), to, amount);
+        IERC20(multi).transfer(to, amount);
         ve_tokenId = 0;
         emit LogWithdrawMulti(amount);
     }
 
     function withdrawReward(address to, uint256 amount) onlyAdmin external {
-        IERC20(IReward(vereward).rewardToken()).transferFrom(address(this), to, amount);
+        IERC20(IReward(vereward).rewardToken()).transfer(to, amount);
         emit LogWithdrawReward(amount);
     }
 
@@ -116,7 +116,7 @@ contract RewardShare is ERC721, Administrable {
 
     function collectGlobalReward(uint256 startEpochId, uint256 endEpochId) internal {
       for (uint i = startEpochId; i <= endEpochId; i++) {
-        globalReward[i] += IReward(vereward).claimReward(ve_tokenId, i, i);
+        rewardCollected[i] += IReward(vereward).claimReward(ve_tokenId, i, i);
       }
     }
 
@@ -124,7 +124,7 @@ contract RewardShare is ERC721, Administrable {
 
     mapping (uint256 => TokenInfo) public tokenInfo;
 
-    uint256 public day = 1 days;
+    uint256 public day = 60;
 
     struct TokenInfo {
         uint256 share;
@@ -132,7 +132,7 @@ contract RewardShare is ERC721, Administrable {
         uint256 endTime;
     }
 
-    function claimableAll(uint256 tokenId) external view returns(uint256) {
+    function claimable(uint256 tokenId) external view returns(uint256) {
       uint256 startTime = lastHarvestUntil[tokenId] > tokenInfo[tokenId].startTime ? lastHarvestUntil[tokenId] : tokenInfo[tokenId].startTime;
       uint256 endTime = block.timestamp < tokenInfo[tokenId].endTime ? block.timestamp : tokenInfo[tokenId].endTime;
       return _claimable(tokenId, startTime, endTime);
@@ -148,14 +148,14 @@ contract RewardShare is ERC721, Administrable {
       uint256 startEpochId = IReward(vereward).getEpochIdByTime(startTime);
       uint256 endEpochId = IReward(vereward).getEpochIdByTime(endTime);
 
-      (uint256 uncollected,) = IReward(vereward).getPendingRewardSingle(ve_tokenId, endEpochId);
-
       uint256 reward = 0;
       uint256 userLockStart;
       uint256 userLockEnd;
       uint256 collectedTime;
+      uint256 uncollected;
       for (uint i = startEpochId; i <= endEpochId; i++) {
-        uint256 reward_i = globalReward[i] + uncollected;
+        (uncollected,) = IReward(vereward).getPendingRewardSingle(ve_tokenId, i);
+        uint256 reward_i = rewardCollected[i] + uncollected;
         (uint epochStartTime, uint epochEndTime, ) = IReward(vereward).getEpochInfo(i);
         // user's unclaimed time span in an epoch
         userLockStart = epochStartTime;
@@ -175,7 +175,8 @@ contract RewardShare is ERC721, Administrable {
       return userReward;
     }
 
-    function harvestAll(uint256 tokenId) external {
+    function harvest(uint256 tokenId) external {
+      require(msg.sender == this.ownerOf(tokenId));
       // user's unclaimed timespan
       uint256 startTime = lastHarvestUntil[tokenId] > tokenInfo[tokenId].startTime ? lastHarvestUntil[tokenId] : tokenInfo[tokenId].startTime;
       uint256 endTime = block.timestamp < tokenInfo[tokenId].endTime ? block.timestamp : tokenInfo[tokenId].endTime;
@@ -184,6 +185,7 @@ contract RewardShare is ERC721, Administrable {
     }
 
     function harvest(uint256 tokenId, uint256 endTime) external {
+      require(msg.sender == this.ownerOf(tokenId));
       // user's unclaimed timespan
       uint256 startTime = lastHarvestUntil[tokenId] > tokenInfo[tokenId].startTime ? lastHarvestUntil[tokenId] : tokenInfo[tokenId].startTime;
       require(endTime <= block.timestamp && endTime <= tokenInfo[tokenId].endTime);
@@ -200,7 +202,7 @@ contract RewardShare is ERC721, Administrable {
       uint256 userLockEnd;
       uint256 collectedTime;
       for (uint i = startEpochId; i <= endEpochId; i++) {
-        uint256 reward_i = globalReward[i];
+        uint256 reward_i = rewardCollected[i];
         (uint epochStartTime, uint epochEndTime, ) = IReward(vereward).getEpochInfo(i);
         // user's unclaimed time span in an epoch
         userLockStart = epochStartTime;
@@ -219,7 +221,7 @@ contract RewardShare is ERC721, Administrable {
       // update last harvest time
       lastHarvestUntil[tokenId] = endTime;
       uint256 userReward = reward * tokenInfo[tokenId].share / totalLocked;
-      IERC20(IReward(vereward).rewardToken()).transferFrom(address(this), msg.sender, userReward);
+      IERC20(IReward(vereward).rewardToken()).transfer(msg.sender, userReward);
       return userReward;
     }
 
